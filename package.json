@@ -1,11 +1,18 @@
 {
-  "name": "logo-server",
+  "name": "swayatt-devops-task",
   "version": "1.0.0",
+  "description": "Simple Express.js app serving Swayatt logo image",
   "main": "app.js",
   "scripts": {
-    "start": "node app.js"
+    "start": "node app.js",
+    "test": "echo 'Running basic health check tests' && node test.js",
+    "dev": "node app.js"
   },
   "dependencies": {
     "express": "^4.18.2"
-  }
+  },
+  "devDependencies": {},
+  "keywords": ["express", "nodejs", "devops", "ci-cd"],
+  "author": "Amaan Saquib",
+  "license": "MIT"
 }
