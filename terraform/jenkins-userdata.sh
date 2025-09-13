@@ -1,24 +1,53 @@
 #!/bin/bash
 set -e
 
+# Log all output
+exec > >(tee /var/log/jenkins-userdata.log)
+exec 2>&1
+
+echo "=== Jenkins Ubuntu Setup Started at $(date) ==="
+
 # Update system
-yum update -y
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get upgrade -y
 
-# Install required packages
-yum install -y docker git curl unzip wget htop
+# Install essential packages
+apt-get install -y \
+    curl \
+    wget \
+    git \
+    unzip \
+    apt-transport-https \
+    ca-certificates \
+    gnupg \
+    lsb-release \
+    software-properties-common
 
-# Install Java 17 (required for Jenkins)
-amazon-linux-extras enable java-openjdk17 || true
-yum install -y java-17-openjdk java-17-openjdk-devel
+# Install Docker
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io
+
+# Start Docker
+systemctl enable docker
+systemctl start docker
+
+# Install Java 17 (for Jenkins)
+apt-get install -y openjdk-17-jdk
+
+# Add Jenkins repository
+wget -q -O - https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key | gpg --dearmor -o /usr/share/keyrings/jenkins-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.gpg] https://pkg.jenkins.io/debian-stable binary/" | tee /etc/apt/sources.list.d/jenkins.list > /dev/null
 
 # Install Jenkins
-wget -O /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/redhat-stable/jenkins.repo
-rpm --import https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
-yum install -y jenkins
+apt-get update
+apt-get install -y jenkins
 
-# Install Node.js 18 (for your Node.js application)
-curl -fsSL https://rpm.nodesource.com/setup_18.x | bash -
-yum install -y nodejs npm
+# Install Node.js 18 (latest LTS)
+curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+apt-get install -y nodejs
 
 # Install AWS CLI v2
 curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
@@ -26,89 +55,60 @@ unzip awscliv2.zip
 ./aws/install
 rm -rf aws awscliv2.zip
 
-# Start and enable services
-systemctl enable docker
-systemctl start docker
+# Configure Jenkins user
+usermod -aG docker jenkins
+
+# Set up Jenkins configuration
+cat > /etc/default/jenkins << 'JENKINS_CONFIG'
+HTTP_PORT=8080
+JENKINS_OPTS="--httpPort=8080"
+JAVA_ARGS="-Djava.awt.headless=true -Xmx1536m -Xms512m -XX:MaxMetaspaceSize=384m -XX:+UseG1GC"
+JENKINS_CONFIG
+
+# Start Jenkins
 systemctl enable jenkins
 systemctl start jenkins
 
-# Add jenkins user to docker group
-usermod -a -G docker jenkins
-
 # Create ECR login script
-cat > /usr/local/bin/ecr-login.sh << 'SCRIPT'
+cat > /usr/local/bin/ecr-login.sh << 'ECR_SCRIPT'
 #!/bin/bash
 aws ecr get-login-password --region ${aws_region} | docker login --username AWS --password-stdin ${ecr_repository_uri}
-SCRIPT
+ECR_SCRIPT
 
 chmod +x /usr/local/bin/ecr-login.sh
 
-# Optimize Jenkins for t3.small instance (2GB RAM)
-cat > /etc/sysconfig/jenkins << 'JENKINS_ENV'
-JENKINS_JAVA_OPTIONS="-Djava.awt.headless=true -Xmx1536m -Xms512m -XX:MaxMetaspaceSize=384m -XX:+UseG1GC -Djava.security.egd=file:/dev/./urandom"
-JENKINS_OPTS="--httpPort=8080 --prefix="
+# Set environment variables for Jenkins
+cat >> /etc/environment << 'ENV_VARS'
 ECR_REPOSITORY_URI=${ecr_repository_uri}
 ECS_CLUSTER_NAME=${ecs_cluster_name}
 ECS_SERVICE_NAME=${ecs_service_name}
 AWS_REGION=${aws_region}
 AWS_DEFAULT_REGION=${aws_region}
-GITHUB_REPO_URL=https://github.com/Amaansaquib/devops-task.git
-JENKINS_ENV
+JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+ENV_VARS
 
-# Optional: Configure swap for extra safety (though not needed with 2GB)
-if [ $(free | grep Mem | awk '{print $2}') -lt 2000000 ]; then
-    fallocate -l 512M /swapfile
-    chmod 600 /swapfile
-    mkswap /swapfile
-    swapon /swapfile
-    echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
-fi
+# Wait for Jenkins to initialize
+sleep 90
 
-# Configure Docker daemon for better performance
-cat > /etc/docker/daemon.json << 'DOCKER_CONFIG'
-{
-  "log-driver": "json-file",
-  "log-opts": {
-    "max-size": "10m",
-    "max-file": "3"
-  },
-  "storage-driver": "overlay2"
-}
-DOCKER_CONFIG
+# Verification
+echo "=== Installation Verification ==="
+java --version
+node --version
+npm --version
+docker --version
+aws --version
 
-systemctl restart docker
-systemctl enable docker
+# Test as jenkins user
+echo "=== Testing as jenkins user ==="
+sudo -u jenkins java --version
+sudo -u jenkins node --version
+sudo -u jenkins npm --version
+sudo -u jenkins docker --version
+sudo -u jenkins aws --version
 
-# Wait for Jenkins to start
-sleep 45
+# Check Jenkins status
+systemctl status jenkins
 
-# Create a comprehensive log file
-cat > /var/log/jenkins-userdata.log << 'LOG'
-==================================================
-Jenkins Installation Completed Successfully
-==================================================
-Date: $(date)
-Instance Type: t3.small (Free Tier eligible)
-CPU: 2 vCPU
-Memory: 2GB RAM
-Java Heap Size: 1.5GB max
-==================================================
-
-Jenkins Initial Setup:
-- URL: http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):8080
-- Initial Admin Password: /var/lib/jenkins/secrets/initialAdminPassword
-
-Services Status:
-LOG
-
-systemctl status jenkins --no-pager >> /var/log/jenkins-userdata.log
-systemctl status docker --no-pager >> /var/log/jenkins-userdata.log
-
-# Show system resources
-echo "" >> /var/log/jenkins-userdata.log
-echo "System Resources:" >> /var/log/jenkins-userdata.log
-free -h >> /var/log/jenkins-userdata.log
-echo "" >> /var/log/jenkins-userdata.log
-lscpu >> /var/log/jenkins-userdata.log
-
-echo "Setup completed successfully!" >> /var/log/jenkins-userdata.log
+echo "=== Jenkins Ubuntu Setup Completed at $(date) ==="
+echo "Jenkins URL: http://$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4):8080"
+echo "SSH Connection: ubuntu@$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)"

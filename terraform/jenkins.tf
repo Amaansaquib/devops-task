@@ -1,11 +1,11 @@
-# Data source for Amazon Linux AMI
-data "aws_ami" "amazon_linux" {
+# Data source for Ubuntu 22.04 LTS AMI
+data "aws_ami" "ubuntu" {
   most_recent = true
-  owners      = ["amazon"]
+  owners      = ["099720109477"] # Canonical
 
   filter {
     name   = "name"
-    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
   }
 
   filter {
@@ -24,9 +24,9 @@ resource "aws_key_pair" "jenkins" {
   })
 }
 
-# Jenkins EC2 instance
+# Jenkins EC2 instance with Ubuntu
 resource "aws_instance" "jenkins" {
-  ami                    = data.aws_ami.amazon_linux.id
+  ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.jenkins_instance_type
   subnet_id              = aws_subnet.public[0].id
   vpc_security_group_ids = [aws_security_group.jenkins.id]
@@ -44,14 +44,14 @@ resource "aws_instance" "jenkins" {
     volume_type = "gp3"
     volume_size = 20
     encrypted   = true
-
+    
     tags = merge(local.tags, {
       Name = "${local.name_prefix}-jenkins-root-volume"
     })
   }
 
   tags = merge(local.tags, {
-    Name = "${local.name_prefix}-jenkins-server"
+    Name = "${local.name_prefix}-jenkins-ubuntu-server"
   })
 
   depends_on = [aws_internet_gateway.main]
@@ -135,7 +135,10 @@ resource "aws_iam_role_policy" "jenkins" {
           "ecr:InitiateLayerUpload",
           "ecr:UploadLayerPart",
           "ecr:CompleteLayerUpload",
-          "ecr:PutImage"
+          "ecr:PutImage",
+          "ecr:ListImages",
+          "ecr:DescribeImages",
+          "ecr:DescribeRepositories"
         ]
         Resource = "*"
       },
@@ -148,7 +151,9 @@ resource "aws_iam_role_policy" "jenkins" {
           "ecs:DescribeTaskDefinition",
           "ecs:RegisterTaskDefinition",
           "ecs:ListTasks",
-          "ecs:DescribeTasks"
+          "ecs:DescribeTasks",
+          "ecs:ListServices",
+          "ecs:ListClusters"
         ]
         Resource = "*"
       },
@@ -158,7 +163,17 @@ resource "aws_iam_role_policy" "jenkins" {
           "logs:CreateLogGroup",
           "logs:CreateLogStream",
           "logs:PutLogEvents",
-          "logs:DescribeLogStreams"
+          "logs:DescribeLogStreams",
+          "logs:DescribeLogGroups"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "elbv2:DescribeLoadBalancers",
+          "elbv2:DescribeTargetGroups",
+          "elbv2:DescribeTargetHealth"
         ]
         Resource = "*"
       }
@@ -176,7 +191,7 @@ resource "aws_iam_instance_profile" "jenkins" {
   })
 }
 
-# Elastic IP for Jenkins (optional but recommended)
+# Elastic IP for Jenkins
 resource "aws_eip" "jenkins" {
   instance = aws_instance.jenkins.id
   domain   = "vpc"
